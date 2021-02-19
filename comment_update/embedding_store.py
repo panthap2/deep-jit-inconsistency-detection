@@ -153,6 +153,12 @@ class EmbeddingStore(nn.Module):
             padding = [self.__nl_vocabulary.get_id_or_unk(Vocabulary.get_pad())] * (pad_length - len(nl_ids))
             return nl_ids + padding
     
+    def pad_length(self, sequence, target_length):
+        if len(sequence) >= target_length:
+            return sequence[:target_length]
+        else:
+            return sequence + [self.__nl_vocabulary.get_id_or_unk(Vocabulary.get_pad()) for _ in range(target_length-len(sequence))]
+    
     def get_code_id(self, token):
         return self.__code_vocabulary.get_id_or_unk(token)
     

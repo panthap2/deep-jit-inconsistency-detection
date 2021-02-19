@@ -2,6 +2,7 @@ from dpu_utils.mlutils import Vocabulary
 import numpy as np
 import torch
 from torch import nn
+from torch_scatter import scatter_add
 
 from constants import START, BEAM_SIZE
 from decoder import Decoder
@@ -66,99 +67,95 @@ class UpdateDecoder(Decoder):
         decoded_batch = [list() for _ in range(batch_size)]
         decoded_batch_scores = np.zeros([batch_size, BEAM_SIZE])
 
-        for b_idx in range(batch_size):
-            beam_scores = torch.ones(BEAM_SIZE, dtype=torch.float32, device=device)
-            beam_status = torch.zeros(BEAM_SIZE, dtype=torch.uint8, device=device)
-            beam_predicted_ids = [list() for _ in range(BEAM_SIZE)]
+        decoder_input = torch.tensor(
+            [[self.embedding_store.get_nl_id(START)]] * batch_size, device=device)
+        decoder_input = decoder_input.unsqueeze(1)
+        decoder_state = initial_state.unsqueeze(1).expand(
+            -1, decoder_input.shape[1], -1).reshape(-1, initial_state.shape[-1])
+
+        beam_scores = torch.ones([batch_size, 1], dtype=torch.float32, device=device)
+        beam_status = torch.zeros([batch_size, 1], dtype=torch.uint8, device=device)
+        beam_predicted_ids = torch.full([batch_size, 1, max_out_len], self.embedding_store.get_end_id(),
+            dtype=torch.int64, device=device)
+
+        for i in range(max_out_len):
+            beam_size = decoder_input.shape[1]
+            if beam_status[:,0].sum() == batch_size:
+                break
+
+            tiled_encoder_states = encoder_hidden_states.unsqueeze(1).expand(-1, beam_size, -1, -1)
+            tiled_masks = masks.unsqueeze(1).expand(-1, beam_size, -1, -1)
+            tiled_code_hidden_states = code_hidden_states.unsqueeze(1).expand(-1, beam_size, -1, -1)
+            tiled_code_masks = code_masks.unsqueeze(1).expand(-1, beam_size, -1, -1)
+            tiled_old_nl_hidden_states = old_nl_hidden_states.unsqueeze(1).expand(-1, beam_size, -1, -1)
+            tiled_old_nl_masks = old_nl_masks.unsqueeze(1).expand(-1, beam_size, -1, -1)
+
+            flat_decoder_input = decoder_input.reshape(-1, decoder_input.shape[-1])
+            flat_encoder_states = tiled_encoder_states.reshape(-1, tiled_encoder_states.shape[-2], tiled_encoder_states.shape[-1])
+            flat_masks = tiled_masks.reshape(-1, tiled_masks.shape[-2], tiled_masks.shape[-1])
+            flat_code_hidden_states = tiled_code_hidden_states.reshape(-1, tiled_code_hidden_states.shape[-2], tiled_code_hidden_states.shape[-1])
+            flat_code_masks = tiled_code_masks.reshape(-1, tiled_code_masks.shape[-2], tiled_code_masks.shape[-1])
+            flat_old_nl_hidden_states = tiled_old_nl_hidden_states.reshape(-1, tiled_old_nl_hidden_states.shape[-2], tiled_old_nl_hidden_states.shape[-1])
+            flat_old_nl_masks = tiled_old_nl_masks.reshape(-1, tiled_old_nl_masks.shape[-2], tiled_old_nl_masks.shape[-1])
+
+            decoder_input_embeddings = self.embedding_store.get_nl_embeddings(flat_decoder_input)
+            decoder_attention_states, flat_decoder_state, generation_logprobs, copy_logprobs = self.decode(
+                decoder_state, decoder_input_embeddings, flat_encoder_states, flat_code_hidden_states, 
+                flat_old_nl_hidden_states, flat_masks, flat_code_masks, flat_old_nl_masks)
             
-            decoder_state = initial_state[b_idx].unsqueeze(0)
-            decoder_input = torch.tensor([[self.embedding_store.get_nl_id(START)]], device=device)
+            generation_logprobs = generation_logprobs.squeeze(1)
+            copy_logprobs = copy_logprobs.squeeze(1)
 
-            for i in range(max_out_len):
-                beam_size = decoder_input.shape[0]
-                tiled_encoder_states = encoder_hidden_states[b_idx].unsqueeze(0).expand(beam_size, -1, -1)
-                tiled_masks = masks[b_idx].expand(beam_size, -1).unsqueeze(1)
-                tiled_code_hidden_states = code_hidden_states[b_idx].unsqueeze(0).expand(beam_size, -1, -1)
-                tiled_code_masks = code_masks[b_idx].expand(beam_size, -1).unsqueeze(1)
-                tiled_old_nl_hidden_states = old_nl_hidden_states[b_idx].unsqueeze(0).expand(beam_size, -1, -1)
-                tiled_old_nl_masks = old_nl_masks[b_idx].expand(beam_size, -1).unsqueeze(1)
+            generation_logprobs = generation_logprobs.reshape(batch_size, beam_size, generation_logprobs.shape[-1])
+            copy_logprobs = copy_logprobs.reshape(batch_size, beam_size, copy_logprobs.shape[-1])
 
-                decoder_input_embeddings = self.embedding_store.get_nl_embeddings(decoder_input)
-                decoder_attention_states, decoder_state, generation_logprobs, copy_logprobs = self.decode(
-                    decoder_state, decoder_input_embeddings, tiled_encoder_states, tiled_code_hidden_states, 
-                    tiled_old_nl_hidden_states, tiled_masks, tiled_code_masks, tiled_old_nl_masks)
-                
-                generation_logprobs = generation_logprobs.squeeze(1)
-                copy_logprobs = copy_logprobs.squeeze(1)
+            prob_scores = torch.zeros([batch_size, beam_size,
+                generation_logprobs.shape[-1] + copy_logprobs.shape[-1]], dtype=torch.float32, device=device)
+            prob_scores[:, :, :generation_logprobs.shape[-1]] = torch.exp(generation_logprobs)
 
-                prob_scores = torch.zeros([beam_size,
-                    generation_logprobs.shape[-1] + copy_logprobs.shape[-1]], dtype=torch.float32, device=device)
-                prob_scores[:, :generation_logprobs.shape[-1]] = torch.exp(generation_logprobs)
-                for b in range(beam_size):
-                    for c, inp_id in enumerate(batch_data.input_ids[b_idx]):
-                        prob_scores[b, inp_id] = prob_scores[b, inp_id] + torch.exp(copy_logprobs[b,c])
+            # Factoring in the copy scores
+            expanded_token_ids = batch_data.input_ids.unsqueeze(1).expand(-1, beam_size, -1)
+            prob_scores += scatter_add(src=torch.exp(copy_logprobs), index=expanded_token_ids, out=torch.zeros_like(prob_scores))
 
-                decoder_state = decoder_state.squeeze(0)
-                top_scores_per_beam, top_indices_per_beam = torch.topk(prob_scores, k=BEAM_SIZE, dim=-1)
-                top_scores_per_beam = top_scores_per_beam.reshape(-1)
-                top_indices_per_beam = top_indices_per_beam.reshape(-1)
+            top_scores_per_beam, top_indices_per_beam = torch.topk(prob_scores, k=BEAM_SIZE, dim=-1)
+            
+            updated_scores = torch.einsum('eb,ebm->ebm', beam_scores, top_scores_per_beam)
+            retained_scores = beam_scores.unsqueeze(-1).expand(-1, -1, top_scores_per_beam.shape[-1])
 
-                full_scores = torch.zeros(beam_size * BEAM_SIZE, dtype=torch.float32, device=device)
-                beam_positions = torch.zeros(beam_size * BEAM_SIZE, dtype=torch.int64, device=device)
+            # Trying to keep at most one ray corresponding to completed beams
+            end_mask = (torch.arange(beam_size) == 0).type(torch.float32).to(device)
+            end_scores = torch.einsum('b,ebm->ebm', end_mask, retained_scores)
+            
+            possible_next_scores = torch.where(beam_status.unsqueeze(-1) == 1, end_scores, updated_scores)
+            possible_next_status = torch.where(top_indices_per_beam == self.embedding_store.get_end_id(),
+                torch.ones([batch_size, beam_size, top_scores_per_beam.shape[-1]], dtype=torch.uint8, device=device),
+                beam_status.unsqueeze(-1).expand(-1,-1,top_scores_per_beam.shape[-1]))
+            
+            possible_beam_predicted_ids = beam_predicted_ids.unsqueeze(2).expand(-1, -1, top_scores_per_beam.shape[-1], -1)
+            pool_next_scores = possible_next_scores.reshape(batch_size, -1)
+            pool_next_status = possible_next_status.reshape(batch_size, -1)
+            pool_next_ids = top_indices_per_beam.reshape(batch_size, -1)
+            pool_predicted_ids = possible_beam_predicted_ids.reshape(batch_size, -1, beam_predicted_ids.shape[-1])
 
-                for beam_idx in range(beam_size):
-                    if beam_status[beam_idx] == 1:
-                        idx = beam_idx*beam_size
-                        beam_positions[idx] = beam_idx
-                        full_scores[idx] = beam_scores[beam_idx]
-                        for sub_beam_idx in range(BEAM_SIZE):
-                            idx = beam_idx*beam_size + sub_beam_idx
-                            beam_positions[idx] = beam_idx
-                        continue
-                    else:
-                        for sub_beam_idx in range(BEAM_SIZE):
-                            idx = beam_idx*beam_size + sub_beam_idx
-                            beam_positions[idx] = beam_idx
-                            full_scores[idx] = beam_scores[beam_idx] * top_scores_per_beam[idx]
-                
-                # https://github.com/budzianowski/PyTorch-Beam-Search-Decoding/blob/9f6b66f43d2e05175dabcc024f79e1d37a667070/decode_beam.py#L124
-                top_scores, top_indices = torch.topk(full_scores, k=BEAM_SIZE, dim=-1)
-                new_scores = torch.ones(BEAM_SIZE, dtype=torch.float32, device=device)
-                new_status = torch.zeros(BEAM_SIZE, dtype=torch.uint8, device=device)
-                new_ids = [list() for _ in range(BEAM_SIZE)]
-                next_step_ids = torch.zeros(BEAM_SIZE, dtype=torch.int64, device=device)
-                next_decoder_state = torch.zeros([BEAM_SIZE, decoder_state.shape[1]], dtype=torch.float32, device=device)
+            possible_decoder_state = flat_decoder_state.reshape(batch_size, beam_size, flat_decoder_state.shape[-1])
+            possible_decoder_state = possible_decoder_state.unsqueeze(2).expand(-1, -1, top_scores_per_beam.shape[-1], -1)
+            pool_decoder_state = possible_decoder_state.reshape(batch_size, -1, possible_decoder_state.shape[-1])
 
-                for b, pos in enumerate(top_indices):
-                    beam_idx = beam_positions[pos]
-                    next_decoder_state[b] = decoder_state[beam_idx]
-                    if beam_status[beam_idx] == 1:
-                        new_scores[b] = beam_scores[beam_idx]
-                        new_status[b] = beam_status[beam_idx]
-                        new_ids[b] = beam_predicted_ids[beam_idx]
-                        next_step_ids[b] = self.embedding_store.get_end_id()
-                    else:
-                        new_scores[b] = top_scores[b]
-                        predicted_id = top_indices_per_beam[pos]
-                        new_status[b] = self.embedding_store.get_end_id() == predicted_id
-                        new_ids[b] = beam_predicted_ids[beam_idx] + [predicted_id]
-                        next_step_ids[b] = predicted_id
-                
-                unks = torch.ones(
-                    next_step_ids.shape[0], dtype=torch.int64, device=device) * self.embedding_store.get_nl_id(Vocabulary.get_unk())
-                decoder_input = torch.where(next_step_ids < len(self.embedding_store.nl_vocabulary), next_step_ids, unks).unsqueeze(1)
-                decoder_state = next_decoder_state
-                beam_scores = new_scores
-                beam_status = new_status
-                beam_predicted_ids = new_ids
-        
-            decoded_batch_scores[b_idx] = beam_scores.cpu()
-            decoded_batch[b_idx] = beam_predicted_ids
+            top_scores, top_indices = torch.topk(pool_next_scores, k=BEAM_SIZE, dim=-1)
+            next_step_ids = torch.gather(pool_next_ids, -1, top_indices)
 
-        return decoded_batch, decoded_batch_scores
+            decoder_state = torch.gather(pool_decoder_state, 1, top_indices.unsqueeze(-1).expand(-1,-1, pool_decoder_state.shape[-1]))
+            decoder_state = decoder_state.reshape(-1, decoder_state.shape[-1])
+            beam_status = torch.gather(pool_next_status, -1, top_indices)
+            beam_scores = torch.gather(pool_next_scores, -1, top_indices)
 
- 
+            end_tags = torch.full_like(next_step_ids, self.embedding_store.get_end_id())
+            next_step_ids = torch.where(beam_status == 1, end_tags, next_step_ids)
 
+            beam_predicted_ids = torch.gather(pool_predicted_ids, 1, top_indices.unsqueeze(-1).expand(-1, -1, pool_predicted_ids.shape[-1]))
+            beam_predicted_ids[:,:,i] = next_step_ids
 
+            unks = torch.full_like(next_step_ids, self.embedding_store.get_nl_id(Vocabulary.get_unk()))
+            decoder_input = torch.where(next_step_ids < len(self.embedding_store.nl_vocabulary), next_step_ids, unks).unsqueeze(-1)
 
-
+        return beam_predicted_ids, beam_scores

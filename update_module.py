@@ -94,10 +94,10 @@ class UpdateModule(nn.Module):
         for i in range(batch_size):
             beam_output = []
             for j in range(len(predictions[i])):
-                token_ids = predictions[i][j]
-                tokens = self.manager.embedding_store.get_nl_tokens(token_ids, batch_data.input_ids[i],
+                token_ids = predictions[i][j].cpu()
+                tokens = self.manager.embedding_store.get_nl_tokens(token_ids, list(batch_data.input_ids[i].cpu()),
                     batch_data.input_str_reps[i])
-                beam_output.append((tokens, scores[i][j]))
+                beam_output.append((tokens, scores[i][j].cpu()))
             decoded_output.append(beam_output)
         return decoded_output, inconsistency_labels
     
@@ -164,19 +164,24 @@ class UpdateModule(nn.Module):
                 print('Saved')
             print('-----------------------------------')
             sys.stdout.flush()
-    
-    def get_likelihood_scores(self, comment_generation_model, formatted_beam_predictions, test_example):
+
+    def get_likelihood_scores(self, comment_generation_model, formatted_beam_predictions, ordered_ids, test_example_cache):
         """Computes the generation likelihood score for each beam prediction based on the pre-trained
            comment generation model."""
         batch_examples = []
         for j in range(len(formatted_beam_predictions)):
+            test_example = test_example_cache[ordered_ids[j]]
             batch_examples.append(Example(test_example.id, test_example.old_comment_raw, test_example.old_comment_subtokens,
                 ' '.join(formatted_beam_predictions[j]), formatted_beam_predictions[j],
                 test_example.old_code_raw, test_example.old_code_subtokens, test_example.new_code_raw,
                 test_example.new_code_subtokens))
         
-        batch_data = comment_generation_model.get_batches(batch_examples)[0]
-        return np.asarray(comment_generation_model.compute_generation_likelihood(batch_data).cpu())
+        batches = comment_generation_model.get_batches(batch_examples)
+        likelihood_scores = []
+        for b, batch_data in enumerate(batches):
+            print('Likelihood computation ({}/{}): {}'.format(b, len(batches), datetime.now().strftime("%m/%d/%Y %H:%M:%S")))
+            likelihood_scores.extend(list(comment_generation_model.compute_generation_likelihood(batch_data).cpu()))
+        return np.asarray(likelihood_scores)
     
     def get_generation_model(self):
         """Loads the pre-trained comment generation model needed for re-ranking.
@@ -215,7 +220,7 @@ class UpdateModule(nn.Module):
 
         with torch.no_grad():
             for b_idx, batch_data in enumerate(test_batches):
-                print('Evaluating {}'.format(b_idx))
+                print('Evaluating {}/{}: {}'.format(b_idx, len(test_batches), datetime.now().strftime("%m/%d/%Y %H:%M:%S")))
                 sys.stdout.flush()
                 pred, labels = self.beam_decode(batch_data)
                 test_predictions.extend(pred)
@@ -229,11 +234,14 @@ class UpdateModule(nn.Module):
             print('Rerank starting: {}'.format(datetime.now().strftime("%m/%d/%Y %H:%M:%S")))
             comment_generation_model = self.get_generation_model()
             reranked_predictions = []
+
+            formatted_beam_predictions = []
+            ordered_ids = []
+            test_example_cache = dict()
+            old_comment_subtokens = []
+            model_scores = np.zeros(len(test_predictions)*len(test_predictions[0]), dtype=np.float)
+
             for i in range(len(test_predictions)):
-                formatted_beam_predictions = []
-                model_scores = np.zeros(len(test_predictions[i]), dtype=np.float)
-                old_comment_subtokens = get_processed_comment_sequence(test_data[i].old_comment_subtokens)
-                
                 for b, (b_pred, b_score) in enumerate(test_predictions[i]):
                     try:
                         b_pred_str = diff_utils.format_minimal_diff_spans(old_comment_subtokens, b_pred)
@@ -241,23 +249,25 @@ class UpdateModule(nn.Module):
                         b_pred_str = ''
                     
                     formatted_beam_predictions.append(b_pred_str.split(' '))
+                    ordered_ids.append(test_data[i].id)
+                    test_example_cache[test_data[i].id] = test_data[i]
+                    old_comment_subtokens.append([get_processed_comment_sequence(test_data[i].old_comment_subtokens)])
                     model_scores[b] = b_score
-                
-                likelihood_scores = self.get_likelihood_scores(comment_generation_model,
-                    formatted_beam_predictions, test_data[i])
-                old_meteor_scores = compute_sentence_meteor(
-                        [[old_comment_subtokens] for _ in range(len(formatted_beam_predictions))],
-                        formatted_beam_predictions)
-                
-                rerank_scores = [(model_scores[j] * MODEL_LAMBDA) + (likelihood_scores[j] * LIKELIHOOD_LAMBDA) + (
-                        old_meteor_scores[j] * OLD_METEOR_LAMBDA) for j in range(len(formatted_beam_predictions))]
-                
-                sorted_indices = np.argsort(-np.asarray(rerank_scores))
-                reranked_predictions.append(test_predictions[i][sorted_indices[0]][0])
             
+            print('Rerank computing likelihood: {}'.format(datetime.now().strftime("%m/%d/%Y %H:%M:%S")))
+            likelihood_scores = self.get_likelihood_scores(comment_generation_model,
+                formatted_beam_predictions, ordered_ids, test_example_cache)
+            print('Rerank computing METEOR: {}'.format(datetime.now().strftime("%m/%d/%Y %H:%M:%S")))
+            old_meteor_scores = np.asarray(compute_sentence_meteor(old_comment_subtokens, formatted_beam_predictions))
+            print('Rerank aggregating socres: {}'.format(datetime.now().strftime("%m/%d/%Y %H:%M:%S")))
+            rerank_scores = MODEL_LAMBDA*model_scores + LIKELIHOOD_LAMBDA*likelihood_scores + OLD_METEOR_LAMBDA*old_meteor_scores
+            rerank_scores = rerank_scores.reshape((len(test_predictions), len(test_predictions[0])))
+            selected_indices = np.argsort(-rerank_scores, axis=-1)[:,0]
+            print('Rerank computing final scores: {}'.format(datetime.now().strftime("%m/%d/%Y %H:%M:%S")))
+            for i in range(len(test_predictions)):
+                reranked_predictions.append(test_predictions[i][selected_indices[i]][0])
             test_predictions = reranked_predictions
-            print('Rerank terminating: {}'.format(datetime.now().strftime("%m/%d/%Y %H:%M:%S")))
-        
+
         print('Final evaluation step starting: {}'.format(datetime.now().strftime("%m/%d/%Y %H:%M:%S")))
 
         predicted_labels = []

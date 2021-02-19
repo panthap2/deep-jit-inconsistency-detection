@@ -246,7 +246,7 @@ class ModuleManager(nn.Module):
                     trg_extended_token_ids.append(trg_extended_sequence_ids)
                     trg_lengths.append(min(len(trg_sequence), self.max_nl_length))
                     inp_str_reps.append(ex_inp_str_reps)
-                    inp_ids.append(ex_inp_ids)
+                    inp_ids.append(self.embedding_store.pad_length(ex_inp_ids, self.max_vocab_extension))
 
                     invalid_copy_positions.append(get_invalid_copy_locations(ex_inp_str_reps, self.max_vocab_extension,
                         trg_sequence, self.max_nl_length))
@@ -266,7 +266,8 @@ class ModuleManager(nn.Module):
                                            torch.tensor(trg_extended_token_ids, dtype=torch.int64, device=device),
                                            torch.tensor(trg_lengths, dtype=torch.int64, device=device),
                                            torch.tensor(invalid_copy_positions, dtype=torch.uint8, device=device),
-                                           inp_str_reps, inp_ids,
+                                           inp_str_reps,
+                                           torch.tensor(inp_ids, dtype=torch.int64, device=device),
                                            torch.tensor(code_features, dtype=torch.float32, device=device),
                                            torch.tensor(nl_features, dtype=torch.float32, device=device),
                                            torch.tensor(labels, dtype=torch.int64, device=device),

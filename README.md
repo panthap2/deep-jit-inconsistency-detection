@@ -67,3 +67,17 @@ python3 display_scores.py --detection_output_file=[PATH TO DETECTION PREDICTIONS
 ```
 
 For evaluating in the pretrained update + detection setting, both filepaths are required. For all other settings, only one should be specified.
+
+**AST Diffing:**
+
+To obtain AST diffs for a new dataset, you should first download `ast-diffing-1.6-jar-with-dependencies.jar` from [here](https://drive.google.com/file/d/1JVfIfJoDDSFBaFOhK18UsBOmC39z03am/view?usp=sharing). Then, go to `data_processing/ast_diffing/python` and run:
+
+```
+python3 xml_diff_parser.py --old_sample_path=[PATH TO OLD VERSION OF CODE] --new_sample_path=[PATH TO OLD VERSION OF CODE] --jar_path=[PATH TO DOWNLOADED JAR FILE]
+```
+
+You can see an example by running:
+
+```
+python3 xml_diff_parser.py --old_sample_path=../code_samples/old.java  --new_sample_path=../code_samples/new.java --jar_path=[PATH TO DOWNLOADED JAR FILE]
+```

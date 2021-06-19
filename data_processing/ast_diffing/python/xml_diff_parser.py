@@ -11,7 +11,6 @@ sys.path.append('../../../')
 sys.path.append('../../../comment_update')
 from data_utils import DiffTreeNode, DiffAST
 
-JAR_FILE_PATH = '../target/ast-diffing-1.6-jar-with-dependencies.jar'
 
 class Indexer:
     def __init__ (self):
@@ -104,11 +103,11 @@ def print_diff_node(diff_node):
     for child in diff_node.children:
         print_diff_node(child)
 
-def get_individual_ast_objs(old_sample_path, new_sample_path, actions_json):
+def get_individual_ast_objs(old_sample_path, new_sample_path, actions_json, jar_path):
     old_xml_path = os.path.join(XML_DIR, 'old.xml')
     new_xml_path = os.path.join(XML_DIR, 'new.xml')
 
-    output = subprocess.check_output(['java', '-jar', JAR_FILE_PATH, old_sample_path,
+    output = subprocess.check_output(['java', '-jar', jar_path, old_sample_path,
         new_sample_path, old_xml_path, new_xml_path, actions_json])
         
     xml_obj = ET.parse(old_xml_path)
@@ -162,10 +161,10 @@ def get_individual_ast_objs(old_sample_path, new_sample_path, actions_json):
 
     return old_diff_ast, new_diff_ast
 
-def get_diff_ast(old_sample_path, new_sample_path, actions_json):
+def get_diff_ast(old_sample_path, new_sample_path, actions_json, jar_path):
     old_xml_path = os.path.join(XML_DIR, 'old.xml')
     new_xml_path = os.path.join(XML_DIR, 'new.xml')
-    output = subprocess.check_output(['java', '-jar', JAR_FILE_PATH, old_sample_path,
+    output = subprocess.check_output(['java', '-jar', jar_path, old_sample_path,
         new_sample_path, old_xml_path, new_xml_path, actions_json])
         
     xml_obj = ET.parse(old_xml_path)
@@ -273,6 +272,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--old_sample_path', help='path to java file containing old version of method')
     parser.add_argument('--new_sample_path', help='path to java file containing new version of method')
+    parser.add_argument('--jar_path', help='path to downloaded jar file')
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format='%(asctime)-15s %(message)s')
@@ -281,5 +281,7 @@ if __name__ == "__main__":
     XML_DIR = 'xml_files/'
     os.makedirs(XML_DIR, exist_ok=True)
 
-    old_ast, new_ast = get_individual_ast_objs(args.old_sample_path, args.new_sample_path, 'old_new_ast_actions.json')
-    diff_ast = get_diff_ast(args.old_sample_path, args.new_sample_path, 'diff_ast_actions.json')
+    old_ast, new_ast = get_individual_ast_objs(args.old_sample_path, args.new_sample_path, 'old_new_ast_actions.json', args.jar_path)
+    diff_ast = get_diff_ast(args.old_sample_path, args.new_sample_path, 'diff_ast_actions.json', args.jar_path)
+
+    print(diff_ast.to_json())

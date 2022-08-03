@@ -10,7 +10,7 @@ If you find this work useful, please consider citing our paper:
   author = {Panthaplackel, Sheena and Li, Junyi Jessy and Gligoric, Milos and Mooney, Raymond J.},
   title = {Deep Just-In-Time Inconsistency Detection Between Comments and Source Code},
   booktitle = {AAAI},
-  pages = {To appear},
+  pages = {427--435},
   year = {2021},
 }
 ```

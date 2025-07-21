@@ -81,3 +81,7 @@ You can see an example by running:
 ```
 python3 xml_diff_parser.py --old_sample_path=../code_samples/old.java  --new_sample_path=../code_samples/new.java --jar_path=[PATH TO DOWNLOADED JAR FILE]
 ```
+
+**More Data Details:**
+
+We have the SHAs corresponding to a sample of the data (~9k examples) available [here](https://drive.google.com/file/d/1YU8mPwIXFTKXGYV17lOzyeZeH4xOjnuT/view?usp=drive_link). The data is formatted as a dictionary, with keys corresponding to example id (i.e., the "id" field of each of the examples in our released data). The values correspond to the SHAs associated with that example, with the "before" commit being first and the "after" commit being second. The change associated with each example was extracted by doing ("git diff <before commit> <after commit>"). We have also made the SHAs corresponding to a larger pool of unfiltered data available [here](https://drive.google.com/file/d/1Bh3I4SUpKTXB6CmJTiwVCxlQqofBVLhv/view?usp=drive_link). The data format is identical.
